@@ -1,2 +1,3 @@
-# butterworth_filtering
-A wholistic attempt at exploring digital signal processing for time series analysis by way of the Butterworth filter
+# Butterworth Filtering in Discrete Time
+
+`butterworth.jl` defines the transfer function of the Butterworth filter by way of frequency transforms over a prototype Butterworth filter of order n.
