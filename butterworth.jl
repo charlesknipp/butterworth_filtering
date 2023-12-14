@@ -1,13 +1,14 @@
 using LinearAlgebra
-using CairoMakie
-using FredData
-using DataFrames
+using Polynomials
+
+# import some convenience operations from DSP
+using DSP: ZeroPoleGain,filtfilt,conv
 
 abstract type AbstractFilter end
 
 function bandpass(
         method::FT,
-        y::Vector{YT},
+        y::AbstractVector{YT},
         ωc::Tuple{Float64,Float64}
     ) where {FT<:AbstractFilter,YT<:Real}
 
@@ -24,7 +25,11 @@ struct Butterworth <: AbstractFilter
     n::Int
 end
 
-function lowpass(proto::Butterworth,y::Vector{YT},ωc::Float64) where YT <: Real
+function lowpass(
+        proto::Butterworth,
+        y::AbstractVector{YT},
+        ωc::Float64
+    ) where YT <: Real
     ϕ = @. (-1)^(0:proto.n) * binomial(proto.n,0:proto.n)
     λ = tan(ωc/2)^(-2*proto.n)
     
@@ -40,7 +45,11 @@ function lowpass(proto::Butterworth,y::Vector{YT},ωc::Float64) where YT <: Real
     return (Γl+λ*Γh) \ Γl
 end
 
-function highpass(proto::Butterworth,y::Vector{YT},ωc::Float64) where YT <: Real
+function highpass(
+        proto::Butterworth,
+        y::AbstractVector{YT},
+        ωc::Float64
+    ) where YT <: Real
     ϕ = @. (-1)^(0:proto.n) * binomial(proto.n,0:proto.n)
     λ = tan(ωc/2)^(-2*proto.n)
     
@@ -65,7 +74,11 @@ struct Henderson <: AbstractFilter
     n::Int
 end
 
-function lowpass(proto::Henderson,y::Vector{YT},ωc::Float64) where YT <: Real
+function lowpass(
+        proto::Henderson,
+        y::AbstractVector{YT},
+        ωc::Float64
+    ) where YT <: Real
     ϕ = @. (-1)^(0:proto.n) * binomial(proto.n,0:proto.n)
     λ = (2*sin(ωc/2))^(-2*proto.n)
     
@@ -79,7 +92,11 @@ function lowpass(proto::Henderson,y::Vector{YT},ωc::Float64) where YT <: Real
     return (I+λ*Q*Q') \ I
 end
 
-function highpass(proto::Henderson,y::Vector{YT},ωc::Float64) where YT <: Real
+function highpass(
+        proto::Henderson,
+        y::AbstractVector{YT},
+        ωc::Float64
+    ) where YT <: Real
     ϕ = @. (-1)^(0:proto.n) * binomial(proto.n,0:proto.n)
     λ = (2*sin(ωc/2))^(-2*proto.n)
     
@@ -99,8 +116,6 @@ function frequency_response(proto::Henderson,ωc::Float64)
 end
 
 ## CONVOLUTIONAL FILTERS ######################################################
-
-using DSP
 
 # construct the prototype butterworth filter
 function prototype(::Type{T},n::Int64) where {T<:Real}
@@ -125,7 +140,6 @@ end
 
 prototype(n::Integer) = prototype(Float64,n)
 
-
 function bilinear(s::Vector{T}) where T <: Number
     z = similar(s)
     σ = bilinear!(z,s)
@@ -133,10 +147,9 @@ function bilinear(s::Vector{T}) where T <: Number
     return z,σ
 end
 
+# this calculation is twofold: bilinear transform which outputs the DC gain
 function bilinear!(z::Vector{T},s::Vector{T}) where T <: Number
     σ = one(1-one(T))
-
-    # this calculation is twofold: bilinear transform which outputs the DC gain
     for i in 1:length(s)
         z[i] = (1+s[i])/(1-s[i])
         σ   *= (1-s[i])
@@ -147,7 +160,6 @@ end
 
 function semibilinear(s::Vector{T}) where T <: Number
     z = similar(s)
-
     for i in eachindex(s)
         ω = 2*asin.(-im*s[i])
         z[i] = cis(ω)
@@ -286,6 +298,48 @@ function bandpass(filter_type::Henderson,ωc::Tuple{Float64,Float64})
     return ZeroPoleGain{:z}(z,p,φ.k*(num/den))
 end
 
+## POLYNOMIAL FUNCTIONS #######################################################
+
+function biquadratic(x::AbstractVector{<:Number})
+    roots = [[1,-xi] for xi in x]
+    
+    biquads = Vector{Float64}[]
+    for i in 1:div(lastindex(roots),2)
+        biquad = real.(conv(roots[(2*i-1):(2*i)]...))
+        biquad[1] = 1.0
+        push!(biquads,biquad)
+    end
+
+    if isodd(lastindex(roots))
+        push!(biquads,real(last(roots)))
+    end
+
+    return biquads
+end
+
+# not as fully featured as DSP, but it works for the relevant IIR filters
+function second_order_sections(zpk::ZeroPoleGain{D}) where D
+    z = zpk.z
+    for i in 1:div(lastindex(z),2)
+        z[[2*i-1,2*i]] = sort(z[[2*i-1,2*i]],by=x->imag(x))
+    end
+
+    p = sort(zpk.p,by=x->abs(abs(x)-1))
+    for i in 1:div(lastindex(p),2)
+        p[[2*i-1,2*i]] = sort(p[[2*i-1,2*i]],by=x->imag(x))
+    end
+
+    # convert to sequence of biquadratics
+    p_biquads = biquadratic(p)
+    z_biquads = !isempty(z) ? biquadratic(z) : fill([1.0],length(p_biquads))
+    gain = zpk.k^(1/length(p_biquads))
+
+    return (
+        b = gain*Polynomial.(z_biquads,D),
+        a = Polynomial.(p_biquads,D)
+    )
+end
+
 # use a convolution over the set of roots to expand the polynomial
 # (I could also just use Polynomials.jl)
 function expand_polynomial(z::Vector{ZT}) where ZT <: Number
@@ -300,7 +354,23 @@ end
 # this could be modified to interface with Polynomials
 function polynomial(zpk::ZeroPoleGain{D}) where D
     return (
-        b = zpk.k*expand_polynomial(zpk.z),
-        a = expand_polynomial(zpk.p)
+        b = Polynomial.(zpk.k*expand_polynomial(zpk.z),D),
+        a = Polynomial.(expand_polynomial(zpk.p),D)
     )
+end
+
+## PLOTTING FUNCTIONS #########################################################
+
+function plot_poles(zpk::ZeroPoleGain)
+    real_poles = [(real(p),imag(p)) for p in zpk.p]
+    angles = sort([π/2+acos(imag(p)) for p in zpk.p])
+
+    fig = Figure()
+    ax = Axis(fig[1,1],aspect=1)
+
+    scatter!(ax,real_poles,color=:black)
+    arc!(ax,Point2f(0),1,-π,π,color=:black,linewidth=1)
+    arc!(ax,Point2f(0),1.1,angles[1:2]...,color=:black,linestyle=:dot)
+    
+    return fig
 end
